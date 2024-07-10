@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-import pyautogui
+#import pyautogui
 import time
 import tkinter as tk
 from tkinter import messagebox
@@ -10,16 +10,14 @@ import os
 import webbrowser
 import sounddevice as sd
 import soundfile as sf
-#from scipy.io.wavfile import write
 from moviepy.editor import VideoFileClip, AudioFileClip
 from pydub import AudioSegment
 import sys
-from ctypes import cast, POINTER
-from comtypes import CLSCTX_ALL
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 import base64
-import win32con
 import portalocker
+import mss
+
+
 
 VERSION = "0.01"
 
@@ -55,7 +53,7 @@ if os.path.isdir(output_path) == False:
     os.mkdir(output_path)
 
 video_file = output_path + "\\output.mp4"
-#audio_mic_file = output_path + "\\output_mic.wav"
+audio_mic_file = output_path + "\\output_mic.wav"
 audio_system_file = output_path + "\\output_system.wav"
 output_file = output_path + "\\final_output.mp4"
 
@@ -99,38 +97,23 @@ def select_area():
     canvas.bind("<ButtonRelease-1>", on_button_release)
 
     record_area.grab_set_global()  # 捕獲滑鼠事件
-def list_audio_devices():
-    devices = AudioUtilities.GetAllDevices()
-    for device in devices:
-        print(f"{device.FriendlyName} - {device.State}")
 
-def set_listen_to_device(device_name, enable=True):
-    devices = AudioUtilities.GetAllDevices()
-    for device in devices:
-        if device.FriendlyName == device_name:
-            endpoint_volume = device.Activate(
-                IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            endpoint_volume = cast(endpoint_volume, POINTER(IAudioEndpointVolume))
-            # 這裡嘗試設置音頻設備的屬性，但需要合適的API來設置 "聆聽此裝置" 屬性
-            # 注意：這需要進一步的 Windows 音頻API來實現，並非直接通過 pycaw 提供
-            # endpoint_volume.SetMute(not enable, None) # 這是靜音的例子
-            print(f"Set {device_name} to {'listen' if enable else 'not listen'}")
 def start_recording():
     global output_path
     global fps_selected
     global video_file
-    #global audio_mic_file
+    global audio_mic_file
     global audio_system_file
     global output_file
     global record_system_sound
     global record_mic_sound
-    
+    global out
     # Lock UI
     ui_enable_disable(False)
     
     t = str(int(time.time()))
     video_file = output_path + "\\" + t + "_tmp.mp4"
-    #audio_mic_file = output_path + "\\" + t + "_mic_tmp.wav"
+    audio_mic_file = output_path + "\\" + t + "_mic_tmp.wav"
     audio_system_file = output_path + "\\" + t + "_system_tmp.wav"
     output_file = output_path + "\\" + t + ".mp4"
     
@@ -144,22 +127,25 @@ def start_recording():
     if x1 == x2 or y1 == y2:
         messagebox.showwarning("警告", "請先選擇錄影範圍！")
         return
-    recording = True
+    recording = True       
+    
+    global fps_selected
     fps = int(fps_selected.get())
     print("fps: %s" % (fps))
+    out = cv2.VideoWriter(video_file, cv2.VideoWriter_fourcc(*'mp4v'), fps, (x2-x1, y2-y1))
     
-    # 看是否要錄聲音
-    
-    
-    
-    out = cv2.VideoWriter(video_file, cv2.VideoWriter_fourcc(*"mp4v"), fps, (x2 - x1, y2 - y1))    
     video_thread = threading.Thread(target=record_video)
     
-    if record_system_sound.get() == True or record_mic_sound.get() == True:
+    # 看是否要錄聲音
+    if record_system_sound.get() == True:
         audio_system_thread = threading.Thread(target=record_system_audio)
+    if record_mic_sound.get() == True:
+        audio_mic_thread = threading.Thread(target=record_mic_audio)
     video_thread.start()    
-    if record_system_sound.get() == True or record_mic_sound.get() == True:
+    if record_system_sound.get() == True:
         audio_system_thread.start()
+    if record_mic_sound.get() == True:
+        audio_mic_thread.start()
     start_button.config(state=tk.DISABLED)
     stop_button.config(state=tk.NORMAL)
 
@@ -177,31 +163,57 @@ def ui_enable_disable(bool_val):
         fps_menu.config(state=tk.DISABLED)
 
 def record_video():
-    global recording, out
-    while recording:
-        img = pyautogui.screenshot(region=(x1, y1, x2 - x1, y2 - y1))
-        frame = np.array(img)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        out.write(frame)
-        #cv2.imshow("Recording", frame)
-        #if cv2.waitKey(1) & 0xFF == ord('q'):
-        #    break
+    global recording
+    global x1, x2, y1, y2
+    global video_file
+    global out
+    w = x2 - x1
+    h = y2 - y1
+    # 設置屏幕捕獲    
+    with mss.mss() as sct:
+        monitor = {"top": y1, "left": x1, "width": x2-x1, "height": y2-y1}
+        while recording:
+            #img = pyautogui.screenshot(region=(x1, y1, x2 - x1, y2 - y1))
+            #frame = np.array(img)
+            #frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            #out.write(frame)
+            #cv2.imshow("Recording", frame)
+            #if cv2.waitKey(1) & 0xFF == ord('q'):
+            #    break
+            #ret, frame = screen.read()
+            #if not ret:
+            #    continue
+            
+            # 截取指定區域的圖像
+            #frame = frame[y1:y2, x1:x2]
+            frame = np.array(sct.grab(monitor))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            # 將幀寫入視頻
+            out.write(frame)
+    # 釋放資源
+    
     out.release()
     cv2.destroyAllWindows()
 
-#def record_mic_audio():
-#    global audio_mic_file   
-#    global recording
-#    samplerate = 44100
-#    channels = 2    
-#    # 開啟音訊檔案準備寫入
-#    with sf.SoundFile(audio_mic_file, mode='x', samplerate=samplerate, channels=channels) as file:
-#        with sd.InputStream(samplerate=samplerate, channels=channels, device=1) as stream:
-#            print('錄製麥克風聲音開始...')
-#            while recording:
-#                data, overflowed = stream.read(1024)
-#                file.write(data)
-#            print('錄製麥克風聲音結束.')
+def record_mic_audio():
+    global audio_mic_file   
+    global recording
+    samplerate = 44100
+    channels = 2    
+    # 開啟音訊檔案準備寫入
+    with sf.SoundFile(audio_mic_file, mode='x', samplerate=samplerate, channels=channels) as file:
+        keywords = ["麥克風","USB PnP Sound Device","Realtek HD Audio Mic input"]
+            
+        # 查找第一組匹配的設備
+        device_index, device_name = find_device_by_name(keywords)
+        if device_index == None:
+            device_index = 0
+        with sd.InputStream(samplerate=samplerate, channels=channels, device=device_index) as stream:
+            print('錄製麥克風聲音開始...')
+            while recording:
+                data, overflowed = stream.read(1024)
+                file.write(data)
+            print('錄製麥克風聲音結束.')
             
 print(sd.query_devices())                
 def record_system_audio():
@@ -213,14 +225,14 @@ def record_system_audio():
     # 開啟音訊檔案準備寫入
     with sf.SoundFile(audio_system_file, mode='x', samplerate=samplerate, channels=channels) as file_system:
         # 使用 OutputStream 寫入系統聲音
-        # 要查找的關鍵字，包括中文和英文名稱的一部分
-        #keywords = ["Microsoft Sound Mapper", "Microsoft 音效對應表"]
-        keywords = ["Stereo Mix","立體聲混音"]
+        # 要查找的關鍵字，包括中文和英文名稱的一部分        
+        keywords = ["立體聲混音","Stereo Mix"]                   
+            
         # 查找第一組匹配的設備
         device_index, device_name = find_device_by_name(keywords)
         if device_index == None:
             device_index = 0
-        print("找到音源: %s" % (device_index))
+        print("使用音源: %s" % (device_index))
         with sd.InputStream(samplerate=samplerate, channels=channels, device=device_index) as sys_stream:
             print('錄製系統聲音開始...')
             while recording:
@@ -233,6 +245,7 @@ def stop_recording():
     global out
     global video_thread    
     global audio_system_thread
+    global audio_mic_thread
     global record_system_sound
     global record_mic_sound
     
@@ -240,11 +253,13 @@ def stop_recording():
         messagebox.showwarning("警告", "錄影未開始！")
         return
     recording = False
-    ui_enable_disable(True)
-    video_thread.join()
-    #audio_mic_thread.join()
-    if record_system_sound.get() == True or record_mic_sound.get() == True:
+    ui_enable_disable(True)    
+    if record_system_sound.get() == True:
         audio_system_thread.join()
+    if record_mic_sound.get() == True:
+        audio_mic_thread.join()
+    # 影片最後才結束
+    video_thread.join()    
     start_button.config(state=tk.NORMAL)
     stop_button.config(state=tk.DISABLED)
     messagebox.showinfo("提示", "錄影已停止")
@@ -259,42 +274,61 @@ def find_device_by_name(keywords):
                 return idx, device['name']
     return None, None  # 如果未找到匹配的設備，返回 None
 def merge_audio_video():
-    #global audio_mic_file
+    global audio_mic_file
     global audio_system_file
     global output_path
     global record_system_sound
     global record_mic_sound
+    global pwd
     video_clip = VideoFileClip(video_file)
     
-    if record_system_sound.get() == True or record_mic_sound.get() == True:
-        final_audio_clip = AudioFileClip(audio_system_file)    
+    tmp_merge_wav_file = pwd+"\\"+str(int(time.time()))+"_merge.wav"
+    if record_system_sound.get() == True and record_mic_sound.get() == True:
+        # from: https://stackoverflow.com/questions/59665469/pyaudio-how-to-capture-microphone-and-system-sounds-in-a-single-stream
+        # 同時有二個聲音，合併
+        speakersound = AudioSegment.from_file(audio_system_file)
+        micsound = AudioSegment.from_file(audio_mic_file)
+        mixsound = speakersound.overlay(micsound)        
+        mixsound.export(tmp_merge_wav_file, format='wav')
+                
+        final_audio_clip = AudioFileClip(tmp_merge_wav_file)    
         # 將合併後的音訊剪輯添加到視訊剪輯中
         final_clip = video_clip.set_audio(final_audio_clip)        
         final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac')
+    elif record_system_sound.get() == True and record_mic_sound.get() == False:
+        # 只有系統聲
+        final_audio_clip = AudioFileClip(audio_system_file)            
+        final_clip = video_clip.set_audio(final_audio_clip)        
+        final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac')
+    elif record_system_sound.get() == False and record_mic_sound.get() == True:
+        # 只有麥克風
+        final_audio_clip = AudioFileClip(audio_mic_file)            
+        final_clip = video_clip.set_audio(final_audio_clip)        
+        final_clip.write_videofile(output_file, codec='libx264', audio_codec='aac')
     else:
+        # 無聲音
         video_clip.write_videofile(output_file, codec='libx264')
-
         
     if os.path.isfile(video_file):
         try:
             os.remove(video_file)
         except:
             pass
-    #if os.path.isfile(audio_mic_file):
-    #    try:
-    #        os.remove(audio_mic_file)
-    #    except:
-    #        pass
+    if os.path.isfile(audio_mic_file):
+        try:
+            os.remove(audio_mic_file)
+        except:
+            pass
     if os.path.isfile(audio_system_file):
         try:
             os.remove(audio_system_file)
         except:
             pass
-    #if os.path.isfile(tmp_file):
-    #    try:
-    #        os.remove(tmp_file)
-    #    except:
-    #        pass
+    if os.path.isfile(tmp_merge_wav_file):
+        try:
+            os.remove(tmp_merge_wav_file)
+        except:
+            pass
 
 def open_folder():
     folder_path = os.path.dirname(os.path.abspath(output_file))
@@ -362,7 +396,7 @@ root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 # 設置窗口不可縮放
 root.resizable(False, False)
 
-root.title(f"我的桌面錄影 - V{VERSION}")
+root.title(f"我的桌面錄影 - V{VERSION} By 羽山秋人(https://3wa.tw)")
 
 # 使用Frame將按鈕排成一行
 button_frame = tk.Frame(root)
@@ -402,7 +436,7 @@ checkbox_microphone = tk.Checkbutton(checkbox_frame, text="錄麥克風", variab
 checkbox_microphone.pack(side=tk.LEFT, padx=5)
 
 # 創建下拉選單的選項
-fps_options = [15, 20, 25, 30]
+fps_options = [15, 20, 25, 30, 60]
 fps_selected = tk.IntVar()
 fps_selected.set(25)  # 預設 25 fps
 

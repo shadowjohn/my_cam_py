@@ -5,6 +5,5 @@ soundfile
 scipy
 moviepy
 pydub
-pycaw
 pywin32
 pyinstaller
