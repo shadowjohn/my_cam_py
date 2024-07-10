@@ -1,1 +1,1 @@
-c:\python312-64\python.exe my_cam_py.py
+c:\python312_64\python.exe my_cam_py.py
