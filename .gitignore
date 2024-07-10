@@ -1,3 +1,5 @@
 /lock.txt
 /output
 /__pycache__/portalocker.cpython-312.pyc
+/build
+/my_cam_py.spec

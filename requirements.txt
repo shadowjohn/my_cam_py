@@ -7,3 +7,4 @@ moviepy
 pydub
 pycaw
 pywin32
+pyinstaller
