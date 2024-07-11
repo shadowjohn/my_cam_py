@@ -6,4 +6,5 @@ scipy
 moviepy
 pydub
 pywin32
+mss
 pyinstaller
