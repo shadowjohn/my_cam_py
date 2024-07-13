@@ -44,7 +44,7 @@ LICENSE: MIT
 	pywin32==306
 	pywin32-ctypes==0.2.2
 	pyinstaller==6.9.0
-	mss (此版羽山有微調)
+	mss (此版羽山有微調 base.py 與 windows.py)
 	
 	詳見 requirements.txt
 	
