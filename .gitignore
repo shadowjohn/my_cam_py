@@ -3,3 +3,14 @@
 /__pycache__/portalocker.cpython-312.pyc
 /build
 /my_cam_py.spec
+/__pycache__
+/.vs
+/mss/__pycache__/__init__.cpython-312.pyc
+/mss/__pycache__/base.cpython-312.pyc
+/mss/__pycache__/exception.cpython-312.pyc
+/mss/__pycache__/factory.cpython-312.pyc
+/mss/__pycache__/models.cpython-312.pyc
+/mss/__pycache__/screenshot.cpython-312.pyc
+/mss/__pycache__/tools.cpython-312.pyc
+/mss/__pycache__/windows.cpython-312.pyc
+/dist/lock.txt
