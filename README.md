@@ -12,13 +12,13 @@ V0.01
 <h3>作者：</h3>
  羽山秋人 (https://3wa.tw)
 
-<h3>LICENSE：</h3>
+<h3>版權：</h3>
  MIT
 
 <h3>最初開發日期：</h3>
  2024-07-12
 
-使用方法: <br>
+<h3>使用方法：</h3>
 <ul>
 	<li>1. 框選螢幕想錄的範圍</li>
 	<li>2. 設定好 fps，通常大概只會選 30 或 60 吧</li>
@@ -37,7 +37,7 @@ V0.01
 </center>
 
 
-相依套件:<br>
+<h3>相依套件：</h3>
 	python3.12 x64 位元，建議可安裝在 C:\python312_64<br>
 	將系統路徑<br>
 		PATH 加上 C:\python312_64<br>
@@ -57,17 +57,22 @@ V0.01
 	
 	詳見 requirements.txt
 	
-安裝相關套件:<br>
+<h3>安裝相關套件：</h3>
 	pip install -r requirements.txt
 
-啟動:<br>
+<h3>啟動：</h3>
 	run.bat
 	
-編譯成exe:<br>
+<h3>編譯成exe：</h3>
 	可詳見 build.bat
 	如果不想執行時有視窗，可以加上 -w 參數
 	
-成果範例:<br>
+<h3>成果範例：</h3>
 	https://github.com/shadowjohn/my_cam_py/tree/main/examples
+
+<h3>更新歷程：</h3>
+(2024-07-14) v0.01 版：
+初版
 		
-	
+<h3>Todo：</h3>
+
