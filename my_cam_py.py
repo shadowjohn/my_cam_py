@@ -1,14 +1,11 @@
 import cv2
 import numpy as np
-
-# import pyautogui
 import time
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 from tkinter import filedialog
 from tkinter import Label, Tk, StringVar
-
 import threading
 import os
 import webbrowser
@@ -20,7 +17,6 @@ import sys
 import base64
 import portalocker
 import mss
-import math
 
 #進度條
 from proglog import ProgressBarLogger
@@ -217,7 +213,8 @@ def process_frames():
                     continue
                 else:
                     # 按照時間差計算需要插入的幀數
-                    frame_times = math.floor(time_diff / frame_step_time)
+                    # 用 int 取代 math.floor
+                    frame_times = int(time_diff / frame_step_time)
                     for _ in range(frame_times):
                         frame_rgb = cv2.cvtColor(np.array(current_frame), cv2.COLOR_RGBA2RGB)
                         GDATA["out"].write(frame_rgb)
