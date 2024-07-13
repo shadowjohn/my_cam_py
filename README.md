@@ -18,9 +18,6 @@ V0.01
 <h3>最初開發日期：</h3>
  2024-07-12
  
-<h3>下載地址：</h3>
- 1.主程式(0.01 beta 版)：<a download="my_cam_py.exe" target="_blank" href="https://raw.githubusercontent.com/shadowjohn/my_cam_py/master/dist/my_cam_py.exe">https://raw.githubusercontent.com/shadowjohn/my_cam_py/master/dist/my_cam_py.exe</a><br>	
-
 <h3>使用方法：</h3>
 <ul>
 	<li>1. 框選螢幕想錄的範圍</li>
@@ -74,8 +71,9 @@ V0.01
 	https://github.com/shadowjohn/my_cam_py/tree/main/examples
 
 <h3>更新歷程：</h3>
-(2024-07-14) v0.01 版：
-初版
+(2024-07-14) v0.01 版：<br>
+初版<br>
+https://www.microsoft.com/en-us/wdsi/submission/3ed2b02f-bdb6-43b3-86ce-86acf056181e
 		
 <h3>Todo：</h3>
 
