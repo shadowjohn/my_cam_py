@@ -237,7 +237,10 @@ class MSSBase(metaclass=ABCMeta):
                     alpha2 = alpha / 255
                     for i in rgb:
                         screen_raw[spos + i] = int(cursor_raw[cpos + i] * alpha2 + screen_raw[spos + i] * (1 - alpha2))
-
+        # By FeatherMountain 用完要回收
+        del cursor
+        del screen_raw
+        del cursor_raw
         return screenshot
 
     @staticmethod

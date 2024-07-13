@@ -322,6 +322,12 @@ class MSS(MSSBase):
         srcdc, memdc = self._handles.srcdc, self._handles.memdc
         gdi, user32 = self.gdi32, self.user32
         width, height = 32, 32
+        
+        # 一直用舊的不知道在想什麼...
+        # Fix by FeatherMountain 2024-07-14
+        self._handles.cursor_info = CURSORINFO()
+        self._handles.cursor_info.cbSize = ctypes.sizeof(CURSORINFO)
+        
         user32.GetCursorInfo(self._handles.cursor_info)
         hcursor = self._handles.cursor_info.hCursor
         pos_screen = self._handles.cursor_info.ptScreenPos
@@ -357,4 +363,6 @@ class MSS(MSSBase):
                     data[i] = 0
                 else:
                     data[i] = 255
+        # 回收看看?
+        del self._handles.data
         return self.cls_image(data, region)

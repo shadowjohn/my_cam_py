@@ -245,9 +245,12 @@ def record_video():
     update_fps_label()
     sct = mss.mss(compression_level=_compression_level,with_cursor=is_need_cursor)
     while GDATA["recording"]:
-        if is_need_cursor == True:
-            # 這樣才會一直更新滑鼠位置
-            sct = mss.mss(compression_level=_compression_level,with_cursor=is_need_cursor)
+        #if is_need_cursor == True:
+        #    # 這樣才會一直更新滑鼠位置
+        #    # 後來直接改 mss/windows.py #328 與 #329 #367 的地方
+        #    # mss/base.py #240~#243 回收 ram
+        #    # 一直重新宣告 sct 造成記憶體肥大 crash
+        #    sct = mss.mss(compression_level=_compression_level,with_cursor=is_need_cursor)
         # 記錄當前時間
         GDATA["frame_count"] += 1
         ct = time.time()
@@ -659,9 +662,9 @@ def update_fps_label():
         try:
             #GDATA["UI"]["fps_label"].config(f"FPS: {calculate_current_fps():.2f}")
             GDATA["UI"]["fps_label"].set(f"FPS: {calculate_current_fps():.2f}")
+            root.after(1000, update_fps_label)  # 每秒更新一次
         except:
-            pass        
-        root.after(1000, update_fps_label)  # 每秒更新一次
+            pass                
 
 # 計算當前 FPS 的輔助函數
 def calculate_current_fps():
