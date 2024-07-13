@@ -1,5 +1,6 @@
 rem rd /S build
-c:\python312_64\scripts\pyinstaller -F -w --onefile --clean --icon="pic\icon.ico" --version-file=metadata.txt ^
+rem -w --clean 
+c:\python312_64\scripts\pyinstaller -F --onefile --icon="pic\icon.ico" --version-file=metadata.txt ^
 --exclude-module=_ssl ^
 --exclude-module=_bz2 ^
 --exclude-module=_lzma ^
@@ -11,4 +12,5 @@ c:\python312_64\scripts\pyinstaller -F -w --onefile --clean --icon="pic\icon.ico
 --exclude-module=IPython ^
 --exclude-module=scipy ^
 --exclude-module=pygments ^
+--add-data=C:\Python312_64\Lib\site-packages\moviepy:moviepy ^
 my_cam_py.py
