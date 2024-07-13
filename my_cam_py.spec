@@ -10,7 +10,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['_ssl', '_bz2', '_lzma', 'pyconfig', 'pytorch', 'torch', 'sqlite3', 'pandas', 'IPython', 'scipy', 'pygments'],
+    excludes=['_ssl', '_bz2', '_lzma', 'pyconfig', 'pytorch', 'torch', 'sqlite3', 'pandas', 'IPython', 'scipy', 'pygments', 'pyinstaller', 'tensorflow', 'unittest', 'doctest', 'pillow', 'av', 'setuptools', 'PIL'],
     noarchive=False,
     optimize=0,
 )
