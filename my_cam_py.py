@@ -545,7 +545,7 @@ root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 # 設置窗口不可縮放
 root.resizable(False, False)
 
-root.title(f"我的桌面錄影 - V{GDATA["VERSION"]} By 羽山秋人(https://3wa.tw)")
+root.title(f"我的桌面錄影 - V{GDATA["VERSION"]} By 羽山秋人 (https://3wa.tw)")
 
 # 使用Frame將按鈕排成一行
 # 第一列
