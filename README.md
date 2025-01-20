@@ -58,7 +58,7 @@ V0.01
 	詳見 requirements.txt
 	
 <h3>安裝相關套件：</h3>
-	pip install -r requirements.txt
+	C:\python312_64\Scripts\pip.exe install -r requirements.txt
 
 <h3>啟動：</h3>
 	run.bat
