@@ -114,7 +114,7 @@ python -c "import cv2, sounddevice, soundfile, moviepy, pydub, mss; print('impor
 <h3>編譯成exe：</h3>
 	可詳見 build.bat
 	如果不想執行時有視窗，可以加上 -w 參數
-	<br>GitHub 單檔限制 100MB，dist/my_cam_py.exe 不再直接放進 git；正式發佈建議使用 GitHub Releases 或本機執行 build.bat 產生。
+	<br>GitHub 單檔限制 100MB；目前 build.bat 會排除不必要的 optional 套件，讓 dist/my_cam_py.exe 維持在 100MB 以內可直接進 git。
 	
 <h3>成果範例：</h3>
 	https://github.com/shadowjohn/my_cam_py/tree/main/examples
