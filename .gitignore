@@ -14,3 +14,8 @@
 /mss/__pycache__/tools.cpython-312.pyc
 /mss/__pycache__/windows.cpython-312.pyc
 /dist/lock.txt
+/dist/output/
+/dist/*TEMP*
+/dist/*_tmp.mp4
+/dist/*_tmp.wav
+/dist/*_merge.wav
