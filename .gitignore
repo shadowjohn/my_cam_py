@@ -4,6 +4,8 @@
 /build
 /my_cam_py.spec
 /__pycache__
+__pycache__/
+*.pyc
 /.vs
 /mss/__pycache__/__init__.cpython-312.pyc
 /mss/__pycache__/base.cpython-312.pyc
@@ -14,3 +16,11 @@
 /mss/__pycache__/tools.cpython-312.pyc
 /mss/__pycache__/windows.cpython-312.pyc
 /dist/lock.txt
+/dist/*.exe
+/dist/output/
+/dist/*TEMP*
+/dist/*_tmp.mp4
+/dist/*_tmp.wav
+/dist/*_merge.wav
+/config.json
+/dist/config.json

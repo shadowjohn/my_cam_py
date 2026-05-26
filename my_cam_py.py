@@ -17,14 +17,44 @@ import sys
 import base64
 import portalocker
 import mss
+import traceback
+import faulthandler
+import atexit
+import ctypes
+import subprocess
+from imageio_ffmpeg import get_ffmpeg_exe
+from recorder_core import (
+    FrameBuffer,
+    append_log,
+    build_explorer_select_args,
+    build_ffmpeg_fast_mux_command,
+    build_final_temp_path,
+    calculate_frame_repetitions,
+    extract_audio_device_name,
+    format_exception_for_log,
+    get_recording_channels,
+    get_input_audio_devices,
+    is_unsafe_capture_error,
+    load_app_config,
+    normalize_record_area,
+    parse_audio_device_index,
+    safe_replace_file,
+    select_default_audio_labels,
+    save_app_config,
+    select_audio_device_label,
+    select_system_audio_device_label,
+    should_abort_capture,
+)
 
 #進度條
 from proglog import ProgressBarLogger
 
 pwd = os.path.dirname(os.path.realpath(sys.argv[0])) # 取得 exe 檔案的目錄路徑
 output_path = pwd + "\\output"
+config_file = pwd + "\\config.json"
+app_config = load_app_config(config_file)
 GDATA = {
-    "VERSION":"0.01",
+    "VERSION":"0.02",
     "UI": {
         "fps_selected": None
     },
@@ -32,6 +62,9 @@ GDATA = {
     },
     "pwd":pwd,
     "output_path":output_path,
+    "log_path":output_path + "\\logs",
+    "config_file": config_file,
+    "app_config": app_config,
     "video_file":output_path + "\\output.mp4",
     "audio_mic_file":output_path + "\\output_mic.wav",
     "audio_system_file":output_path + "\\output_system.wav",
@@ -44,12 +77,78 @@ GDATA = {
     "x2": 0,
     "y2": 0,
     "rect": None,
-    "frame_list": [], # 幀列表
+    "frame_buffer": FrameBuffer(max_frames=1800), # 幀佇列
+    "capture_area": None,
     "run_start_time": None, # 影片開始轉檔時間
     "run_end_time": None, # 影片結束轉檔時間
+    "stop_in_progress": False,
+    "close_after_merge": False,
+    "last_error": None,
+    "record_system_enabled": False,
+    "record_mic_enabled": False,
+    "record_mouse_enabled": True,
+    "compression_level": 2,
+    "audio_input_devices": [],
+    "system_audio_device_index": None,
+    "mic_audio_device_index": None,
+    "system_audio_channels": 2,
+    "mic_audio_channels": 2,
+    "video_error_count": 0,
+    "video_consecutive_error_count": 0,
+    "written_frame_count": 0,
+    "last_dropped_frames": 0,
+    "audio_options_visible": False,
+    "window_width": 452,
+    "window_height_collapsed": 145,
+    "window_height_expanded": 215,
 }
 
 lock_file = pwd + "\\lock.txt"
+
+os.makedirs(GDATA["output_path"], exist_ok=True)
+os.makedirs(GDATA["log_path"], exist_ok=True)
+
+crash_log_file = None
+
+
+def write_crash_log(message):
+    try:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(GDATA["log_path"] + "\\crash_" + time.strftime("%Y%m%d") + ".log", "a", encoding="utf-8") as f:
+            f.write("[%s] %s\n" % (timestamp, message))
+    except:
+        pass
+
+
+def install_crash_handlers():
+    global crash_log_file
+    try:
+        crash_log_path = GDATA["log_path"] + "\\crash_" + time.strftime("%Y%m%d_%H%M%S") + ".log"
+        crash_log_file = open(crash_log_path, "a", encoding="utf-8", buffering=1)
+        crash_log_file.write("[%s] 啟動 crash handler\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        faulthandler.enable(file=crash_log_file, all_threads=True)
+        sys.stderr = crash_log_file
+    except Exception as ex:
+        write_crash_log("啟動 crash handler 失敗: %s" % ex)
+
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        message = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        write_crash_log("未捕捉例外:\n%s" % message)
+        try:
+            messagebox.showerror("程式錯誤", "程式發生未捕捉例外，已寫入 output\\logs\\crash_*.log")
+        except:
+            pass
+
+    def handle_thread_exception(args):
+        message = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        write_crash_log("Thread 未捕捉例外 %s:\n%s" % (args.thread.name if args.thread else "", message))
+
+    sys.excepthook = handle_exception
+    threading.excepthook = handle_thread_exception
+    atexit.register(lambda: write_crash_log("程式結束"))
+
+
+install_crash_handlers()
 
 # 檢查是否存在鎖定檔案並創建文件鎖
 # 防程式重複啟動
@@ -121,6 +220,29 @@ def select_area():
 
 def start_recording():            
     global GDATA
+    if GDATA["recording"]:
+        messagebox.showwarning("警告", "錄影已經在進行中！")
+        return
+    try:
+        GDATA["capture_area"] = normalize_record_area(GDATA["x1"], GDATA["y1"], GDATA["x2"], GDATA["y2"])
+    except ValueError:
+        messagebox.showwarning("警告", "請先選擇錄影範圍！")
+        return
+
+    GDATA["fps"] = float(GDATA["UI"]["fps_selected"].get())
+    GDATA["record_system_enabled"] = GDATA["UI"]["record_system_sound"].get()
+    GDATA["record_mic_enabled"] = GDATA["UI"]["record_mic_sound"].get()
+    GDATA["record_mouse_enabled"] = GDATA["UI"]["record_mouse"].get()
+    GDATA["compression_level"] = GDATA["UI"]["compression_level_selected"].get()
+    GDATA["system_audio_device_index"] = parse_audio_device_index(GDATA["UI"]["system_audio_device_selected"].get())
+    GDATA["mic_audio_device_index"] = parse_audio_device_index(GDATA["UI"]["mic_audio_device_selected"].get())
+
+    capture_ok, capture_message = preflight_capture_area(GDATA["capture_area"], GDATA["compression_level"])
+    if not capture_ok:
+        GDATA["UI"]["progress_label"].config(text="畫面擷取測試失敗")
+        messagebox.showerror("畫面擷取失敗", "錄影前測試失敗，已取消錄影。\n\n%s" % capture_message)
+        return
+
     # Lock UI
     ui_enable_disable(False)
 
@@ -132,31 +254,42 @@ def start_recording():
 
     print("x1, y1: %s, %s" % (GDATA["x1"], GDATA["y1"]))
     print("x2, y2: %s, %s" % (GDATA["x2"], GDATA["y2"]))           
-    if GDATA["recording"]:
-        messagebox.showwarning("警告", "錄影已經在進行中！")
-        return
-    if GDATA["x1"] == GDATA["x2"] or GDATA["y1"] == GDATA["y2"]:
-        messagebox.showwarning("警告", "請先選擇錄影範圍！")
-        return
     GDATA["UI"]["progress_label"].config(text="影像截取中...")
+    GDATA["UI"]["progress"].config(value=0)
     GDATA["recording"] = True      
+    GDATA["stop_in_progress"] = False
+    GDATA["last_error"] = None
+    GDATA["video_error_count"] = 0
+    GDATA["video_consecutive_error_count"] = 0
+    GDATA["written_frame_count"] = 0
+    GDATA["last_dropped_frames"] = 0
     
-    GDATA["fps"] = float(GDATA["UI"]["fps_selected"].get())
-    w = GDATA["x2"] - GDATA["x1"]
-    h = GDATA["y2"] - GDATA["y1"]
+    missing_audio_messages = []
+    if GDATA["record_system_enabled"] == True and GDATA["system_audio_device_index"] is None:
+        GDATA["record_system_enabled"] = False
+        missing_audio_messages.append("找不到系統聲音輸入裝置，將略過系統聲音。")
+    if GDATA["record_mic_enabled"] == True and GDATA["mic_audio_device_index"] is None:
+        GDATA["record_mic_enabled"] = False
+        missing_audio_messages.append("找不到麥克風輸入裝置，將略過麥克風。")
+    if len(missing_audio_messages) > 0:
+        messagebox.showwarning("音源提醒", "\n".join(missing_audio_messages))
+    probe_messages = probe_selected_audio_devices()
+    if len(probe_messages) > 0:
+        messagebox.showwarning("音源檢查", "\n\n".join(probe_messages))
+    save_current_app_config()
     #GDATA["out"] = cv2.VideoWriter(GDATA["video_file"], cv2.VideoWriter_fourcc(*"MP4V"), GDATA["fps"], (w, h))    
-    GDATA["frame_list"] = []
-    GDATA["THREAD"]["video_thread"] = threading.Thread(target=record_video)
-    GDATA["THREAD"]["process_thread"] = threading.Thread(target=process_frames)
+    GDATA["frame_buffer"] = FrameBuffer(max_frames=int(GDATA["fps"] * 60))
+    GDATA["THREAD"]["video_thread"] = create_worker_thread("video_thread", record_video)
+    GDATA["THREAD"]["process_thread"] = create_worker_thread("process_thread", process_frames)
     
     # 看是否要錄聲音
-    if GDATA["UI"]["record_system_sound"].get() == True:
-        GDATA["THREAD"]["audio_system_thread"] = threading.Thread(target=record_system_audio)
-    if GDATA["UI"]["record_mic_sound"].get() == True:
-        GDATA["THREAD"]["audio_mic_thread"] = threading.Thread(target=record_mic_audio)    
-    if GDATA["UI"]["record_system_sound"].get() == True:
+    if GDATA["record_system_enabled"] == True:
+        GDATA["THREAD"]["audio_system_thread"] = create_worker_thread("audio_system_thread", record_system_audio)
+    if GDATA["record_mic_enabled"] == True:
+        GDATA["THREAD"]["audio_mic_thread"] = create_worker_thread("audio_mic_thread", record_mic_audio)
+    if GDATA["record_system_enabled"] == True:
         GDATA["THREAD"]["audio_system_thread"].start()
-    if GDATA["UI"]["record_mic_sound"].get() == True:
+    if GDATA["record_mic_enabled"] == True:
         GDATA["THREAD"]["audio_mic_thread"].start()
     
     GDATA["THREAD"]["video_thread"].start()
@@ -170,148 +303,537 @@ def ui_enable_disable(bool_val):
     if bool_val == True:
         GDATA["UI"]["checkbox_system_sound"].config(state=tk.NORMAL)
         GDATA["UI"]["checkbox_microphone"].config(state=tk.NORMAL)
+        GDATA["UI"]["auto_test_audio_button"].config(state=tk.NORMAL)
+        GDATA["UI"]["toggle_audio_options_button"].config(state=tk.NORMAL)
         GDATA["UI"]["fps_menu"].config(state=tk.NORMAL)
         GDATA["UI"]["checkbox_mouse_cursor"].config(state=tk.NORMAL)
         GDATA["UI"]["select_area_button"].config(state=tk.NORMAL)
         GDATA["UI"]["compression_level_selected_menu"].config(state=tk.NORMAL)
+        GDATA["UI"]["system_audio_device_menu"].config(state=tk.NORMAL)
+        GDATA["UI"]["mic_audio_device_menu"].config(state=tk.NORMAL)
+        GDATA["UI"]["refresh_audio_devices_button"].config(state=tk.NORMAL)
         GDATA["UI"]["exit_button"].config(state=tk.NORMAL)
     else:
         GDATA["UI"]["checkbox_system_sound"].config(state=tk.DISABLED)
         GDATA["UI"]["checkbox_microphone"].config(state=tk.DISABLED)
+        GDATA["UI"]["auto_test_audio_button"].config(state=tk.DISABLED)
+        GDATA["UI"]["toggle_audio_options_button"].config(state=tk.DISABLED)
         GDATA["UI"]["fps_menu"].config(state=tk.DISABLED)
         GDATA["UI"]["checkbox_mouse_cursor"].config(state=tk.DISABLED)
         GDATA["UI"]["select_area_button"].config(state=tk.DISABLED)
         GDATA["UI"]["compression_level_selected_menu"].config(state=tk.DISABLED)
+        GDATA["UI"]["system_audio_device_menu"].config(state=tk.DISABLED)
+        GDATA["UI"]["mic_audio_device_menu"].config(state=tk.DISABLED)
+        GDATA["UI"]["refresh_audio_devices_button"].config(state=tk.DISABLED)
         GDATA["UI"]["exit_button"].config(state=tk.DISABLED)
-        
+
+
+def log_event(category, message, ex=None):
+    try:
+        append_log(GDATA["log_path"], category, message, exception=format_exception_for_log(ex) if ex is not None else None)
+    except Exception as log_ex:
+        print("寫入 log 失敗: %s" % (log_ex))
+
+
+def record_thread_error(category, message, ex):
+    GDATA["last_error"] = str(ex)
+    log_event(category, message, ex)
+
+
+def get_tail_text(text, max_length=900):
+    if text is None:
+        return ""
+    text = str(text).strip()
+    if len(text) <= max_length:
+        return text
+    return text[-max_length:]
+
+
+def preflight_capture_area(capture_area, compression_level):
+    monitor = {
+        "top": capture_area["top"],
+        "left": capture_area["left"],
+        "width": capture_area["width"],
+        "height": capture_area["height"],
+    }
+    sct = None
+    try:
+        sct = mss.mss(compression_level=compression_level, with_cursor=False)
+        sct.grab(monitor)
+        return True, ""
+    except Exception as ex:
+        record_thread_error("video", "錄影前畫面擷取測試失敗", ex)
+        return False, format_exception_for_log(ex)
+    finally:
+        if sct is not None:
+            try:
+                sct.close()
+            except:
+                pass
+
+
+def create_worker_thread(thread_name, target):
+    def guarded_run():
+        try:
+            target()
+        except Exception as ex:
+            record_thread_error("thread", "%s 執行緒異常" % thread_name, ex)
+            write_crash_log("%s 執行緒異常:\n%s" % (thread_name, traceback.format_exc()))
+            GDATA["recording"] = False
+            ui_set_text(GDATA["UI"]["progress_label"], "%s 執行緒異常，已停止錄影" % thread_name)
+            if thread_name in ["video_thread", "process_thread", "audio_system_thread", "audio_mic_thread"] and not GDATA["stop_in_progress"]:
+                GDATA["stop_in_progress"] = True
+                ui_set_text(GDATA["UI"]["progress_label"], "%s 執行緒異常，正在收尾" % thread_name)
+                GDATA["THREAD"]["finish_thread"] = create_worker_thread("finish_thread", finish_recording)
+                GDATA["THREAD"]["finish_thread"].start()
+            elif thread_name in ["finish_thread", "run"]:
+                restore_recording_ui()
+
+    return threading.Thread(target=guarded_run, name=thread_name)
+
+
+def ui_after(callback, *args, **kwargs):
+    try:
+        root.after(0, lambda: callback(*args, **kwargs))
+    except:
+        pass
+
+
+def ui_set_text(widget, text):
+    ui_after(widget.config, text=text)
+
+
+def ui_set_var(var, value):
+    ui_after(var.set, value)
+
+
+def ui_set_progress(value):
+    ui_after(GDATA["UI"]["progress"].config, value=value)
+
+
+def ui_set_processing_stage(text, progress_value=None):
+    ui_set_text(GDATA["UI"]["progress_label"], text)
+    if progress_value is not None:
+        ui_set_progress(progress_value)
+
+
+def ui_set_widget_state(widget, state):
+    ui_after(widget.config, state=state)
+
+
+def join_worker_thread(thread_name):
+    worker = GDATA["THREAD"].get(thread_name)
+    if worker is not None and worker.is_alive() and worker != threading.current_thread():
+        worker.join()
+
+
+def restore_recording_ui(reset_progress=True):
+    GDATA["stop_in_progress"] = False
+    if reset_progress:
+        ui_set_progress(0)
+    ui_set_widget_state(GDATA["UI"]["start_button"], tk.NORMAL)
+    ui_set_widget_state(GDATA["UI"]["stop_button"], tk.DISABLED)
+    ui_after(ui_enable_disable, True)
+
+
+def get_frame_buffer_stats_text():
+    stats = GDATA["frame_buffer"].stats()
+    return "Q%s/%s D%s" % (stats["queued_frames"], stats["max_frames"], stats["dropped_frames"])
+
+
+def log_frame_buffer_stats_if_needed():
+    stats = GDATA["frame_buffer"].stats()
+    if stats["dropped_frames"] > GDATA["last_dropped_frames"]:
+        GDATA["last_dropped_frames"] = stats["dropped_frames"]
+        log_event(
+            "video",
+            "Frame queue dropped=%s queued=%s/%s received=%s" % (
+                stats["dropped_frames"],
+                stats["queued_frames"],
+                stats["max_frames"],
+                stats["received_frames"],
+            )
+        )
+
+
+def set_option_menu_options(option_menu, variable, options, selected_value):
+    menu = option_menu["menu"]
+    menu.delete(0, "end")
+    for option in options:
+        menu.add_command(label=option, command=tk._setit(variable, option))
+    variable.set(selected_value)
+
+
+def build_current_app_config():
+    return {
+        "fps": GDATA["UI"]["fps_selected"].get(),
+        "compression_level": GDATA["UI"]["compression_level_selected"].get(),
+        "record_mouse": GDATA["UI"]["record_mouse"].get(),
+        "record_system_sound": GDATA["UI"]["record_system_sound"].get(),
+        "record_mic_sound": GDATA["UI"]["record_mic_sound"].get(),
+        "system_audio_device_name": extract_audio_device_name(GDATA["UI"]["system_audio_device_selected"].get()),
+        "mic_audio_device_name": extract_audio_device_name(GDATA["UI"]["mic_audio_device_selected"].get()),
+    }
+
+
+def save_current_app_config():
+    try:
+        GDATA["app_config"] = save_app_config(GDATA["config_file"], build_current_app_config())
+    except Exception as ex:
+        log_event("config", "儲存設定失敗", ex)
+
+
+def probe_audio_input_device(device_index, channels, title):
+    try:
+        with sd.InputStream(samplerate=44100, channels=channels, device=device_index) as stream:
+            stream.read(128)
+        return True, ""
+    except Exception as ex:
+        log_event("audio", "%s 音源檢查失敗" % title, ex)
+        return False, str(ex)
+
+
+def probe_selected_audio_devices():
+    messages = []
+    input_devices = GDATA["audio_input_devices"]
+
+    if GDATA["record_system_enabled"] == True and GDATA["system_audio_device_index"] is not None:
+        GDATA["system_audio_channels"] = get_recording_channels(input_devices, GDATA["system_audio_device_index"])
+        ok, error_message = probe_audio_input_device(GDATA["system_audio_device_index"], GDATA["system_audio_channels"], "系統聲音")
+        if not ok:
+            GDATA["record_system_enabled"] = False
+            messages.append("系統聲音音源無法開啟，將略過系統聲音。\n%s" % error_message)
+
+    if GDATA["record_mic_enabled"] == True and GDATA["mic_audio_device_index"] is not None:
+        GDATA["mic_audio_channels"] = get_recording_channels(input_devices, GDATA["mic_audio_device_index"])
+        ok, error_message = probe_audio_input_device(GDATA["mic_audio_device_index"], GDATA["mic_audio_channels"], "麥克風")
+        if not ok:
+            GDATA["record_mic_enabled"] = False
+            messages.append("麥克風音源無法開啟，將略過麥克風。\n%s" % error_message)
+
+    return messages
+
+
+def get_root_geometry_position():
+    geometry = root.geometry()
+    parts = geometry.split("+")
+    if len(parts) >= 3:
+        return parts[-2], parts[-1]
+    return str(root.winfo_x()), str(root.winfo_y())
+
+
+def set_audio_options_visible(visible):
+    GDATA["audio_options_visible"] = visible
+    if "audio_frame" not in GDATA["UI"]:
+        return
+
+    if visible:
+        if "third_frame" in GDATA["UI"]:
+            GDATA["UI"]["audio_frame"].pack(before=GDATA["UI"]["third_frame"], pady=(0, 4))
+        else:
+            GDATA["UI"]["audio_frame"].pack(pady=(0, 4))
+    else:
+        GDATA["UI"]["audio_frame"].pack_forget()
+
+    if "toggle_audio_options_button" in GDATA["UI"]:
+        GDATA["UI"]["toggle_audio_options_button"].config(text="隱藏音源" if visible else "音源選擇")
+
+    if "root_ready" in GDATA and GDATA["root_ready"] == True:
+        height = GDATA["window_height_expanded"] if visible else GDATA["window_height_collapsed"]
+        x, y = get_root_geometry_position()
+        root.geometry(f"{GDATA['window_width']}x{height}+{x}+{y}")
+
+
+def toggle_audio_options():
+    set_audio_options_visible(not GDATA["audio_options_visible"])
+
+
+def refresh_audio_devices(force_default=False):
+    global GDATA
+    try:
+        GDATA["audio_input_devices"] = get_input_audio_devices(sd.query_devices(), sd.query_hostapis())
+        GDATA["last_error"] = None
+    except Exception as ex:
+        GDATA["audio_input_devices"] = []
+        GDATA["last_error"] = str(ex)
+        log_event("audio", "列舉音源失敗", ex)
+
+    if "system_audio_device_menu" not in GDATA["UI"]:
+        return
+
+    input_devices = GDATA["audio_input_devices"]
+    options = ["無可用輸入音源"] + [device["label"] for device in input_devices]
+
+    if force_default:
+        labels = select_default_audio_labels(
+            input_devices,
+            saved_system_device_name=GDATA["app_config"].get("system_audio_device_name", ""),
+            saved_mic_device_name=GDATA["app_config"].get("mic_audio_device_name", ""),
+        )
+        system_selected = labels["system"]
+        mic_selected = labels["mic"]
+    else:
+        system_selected = select_system_audio_device_label(
+            GDATA["UI"]["system_audio_device_selected"].get(),
+            input_devices,
+            saved_device_name=GDATA["app_config"].get("system_audio_device_name", ""),
+        )
+        mic_selected = select_audio_device_label(
+            GDATA["UI"]["mic_audio_device_selected"].get(),
+            input_devices,
+            ["麥克風", "Microphone", "USB PnP Sound Device", "Realtek HD Audio Mic input"],
+            saved_device_name=GDATA["app_config"].get("mic_audio_device_name", ""),
+            allow_first=True,
+        )
+
+    set_option_menu_options(GDATA["UI"]["system_audio_device_menu"], GDATA["UI"]["system_audio_device_selected"], options, system_selected)
+    set_option_menu_options(GDATA["UI"]["mic_audio_device_menu"], GDATA["UI"]["mic_audio_device_selected"], options, mic_selected)
+
+
+def auto_test_audio_devices():
+    refresh_audio_devices(force_default=True)
+    input_devices = GDATA["audio_input_devices"]
+    messages = []
+
+    system_index = parse_audio_device_index(GDATA["UI"]["system_audio_device_selected"].get())
+    if system_index is None:
+        GDATA["UI"]["record_system_sound"].set(False)
+        messages.append("系統聲音：找不到可用音源，已關閉。")
+    else:
+        system_channels = get_recording_channels(input_devices, system_index)
+        ok, error_message = probe_audio_input_device(system_index, system_channels, "系統聲音")
+        GDATA["UI"]["record_system_sound"].set(ok)
+        messages.append("系統聲音：%s" % ("可用" if ok else "不可用，已關閉"))
+        if not ok:
+            messages.append(error_message)
+
+    mic_index = parse_audio_device_index(GDATA["UI"]["mic_audio_device_selected"].get())
+    if mic_index is None:
+        GDATA["UI"]["record_mic_sound"].set(False)
+        messages.append("麥克風：找不到可用音源，已關閉。")
+    else:
+        mic_channels = get_recording_channels(input_devices, mic_index)
+        ok, error_message = probe_audio_input_device(mic_index, mic_channels, "麥克風")
+        GDATA["UI"]["record_mic_sound"].set(ok)
+        messages.append("麥克風：%s" % ("可用" if ok else "不可用，已關閉"))
+        if not ok:
+            messages.append(error_message)
+
+    save_current_app_config()
+    set_audio_options_visible(False)
+    messagebox.showinfo("自動測試", "\n".join(messages))
+
+
+class CursorPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def get_cursor_position():
+    try:
+        point = CursorPoint()
+        if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+            return (point.x, point.y)
+    except:
+        pass
+    return None
+
+
+def draw_cursor_indicator(frame_rgb, cursor_position, capture_area):
+    if cursor_position is None:
+        return frame_rgb
+
+    x = int(cursor_position[0] - capture_area["left"])
+    y = int(cursor_position[1] - capture_area["top"])
+    height, width = frame_rgb.shape[:2]
+    if x < -24 or y < -24 or x >= width + 24 or y >= height + 24:
+        return frame_rgb
+
+    points = np.array([
+        [x, y],
+        [x, y + 18],
+        [x + 5, y + 14],
+        [x + 10, y + 24],
+        [x + 14, y + 22],
+        [x + 9, y + 13],
+        [x + 18, y + 13],
+    ], dtype=np.int32)
+    cv2.polylines(frame_rgb, [points], True, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.fillPoly(frame_rgb, [points], (255, 255, 255), lineType=cv2.LINE_AA)
+    cv2.polylines(frame_rgb, [points], True, (0, 0, 0), 1, cv2.LINE_AA)
+    return frame_rgb
+
+
+def build_video_frame(current_frame_data, capture_area):
+    frame_rgb = cv2.cvtColor(np.array(current_frame_data["frame"]), cv2.COLOR_RGBA2RGB)
+    if GDATA["record_mouse_enabled"]:
+        draw_cursor_indicator(frame_rgb, current_frame_data.get("cursor_position"), capture_area)
+    return frame_rgb
+
+
 def process_frames():
     global GDATA
-    w = GDATA["x2"] - GDATA["x1"]
-    h = GDATA["y2"] - GDATA["y1"]
-    GDATA["out"] = cv2.VideoWriter(GDATA["video_file"], cv2.VideoWriter_fourcc(*"MP4V"), GDATA["fps"], (w, h))    
+    capture_area = GDATA["capture_area"]
+    w = capture_area["width"]
+    h = capture_area["height"]
+    GDATA["out"] = cv2.VideoWriter(GDATA["video_file"], cv2.VideoWriter_fourcc(*"MP4V"), GDATA["fps"], (w, h))
+    if not GDATA["out"].isOpened():
+        raise RuntimeError("VideoWriter 無法開啟輸出檔: %s" % GDATA["video_file"])
     last_frame_time = None
 
     # 每一幀間隔時間
     frame_step_time = 1 / GDATA["fps"]
 
-    while GDATA["recording"] or len(GDATA["frame_list"]) > 0:
-        if len(GDATA["frame_list"]) > 0:
-            current_frame_data = GDATA["frame_list"].pop(0)
-            current_time = current_frame_data["timestamp"]
-            current_frame = current_frame_data["frame"]
+    try:
+        while GDATA["recording"] or not GDATA["frame_buffer"].empty():
+            current_frame_data = GDATA["frame_buffer"].get(timeout=0.1)
+            if current_frame_data is not None:
+                current_time = current_frame_data["timestamp"]
 
-            if last_frame_time is None:
-                # 第一幀
-                last_frame_time = current_time
-                frame_rgb = cv2.cvtColor(np.array(current_frame), cv2.COLOR_RGBA2RGB)
-                GDATA["out"].write(frame_rgb)
-            else:
-                # 計算時間差
-                time_diff = current_time - last_frame_time
-                if time_diff < frame_step_time:
-                    # 超速了 這張多截的，不要
-                    continue
+                if last_frame_time is None:
+                    # 第一幀
+                    last_frame_time = current_time
+                    frame_rgb = build_video_frame(current_frame_data, capture_area)
+                    GDATA["out"].write(frame_rgb)
+                    GDATA["written_frame_count"] += 1
                 else:
-                    # 按照時間差計算需要插入的幀數
-                    # 用 int 取代 math.floor
-                    frame_times = int(time_diff / frame_step_time)
-                    for _ in range(frame_times):
-                        frame_rgb = cv2.cvtColor(np.array(current_frame), cv2.COLOR_RGBA2RGB)
-                        GDATA["out"].write(frame_rgb)
-                    last_frame_time += frame_times * frame_step_time  # 更新最後一幀的時間
-        time.sleep(0.001)  # 避免空循環佔用太多 CPU
+                    # 計算時間差
+                    time_diff = current_time - last_frame_time
+                    frame_times, is_time_anomaly = calculate_frame_repetitions(time_diff, GDATA["fps"])
+                    if frame_times <= 0:
+                        # 超速了 這張多截的，不要
+                        continue
+                    else:
+                        if is_time_anomaly:
+                            log_event("video", "偵測到異常 frame 時間差 %.3f 秒，已重新同步避免影片時長爆增" % time_diff)
+                        # 按照時間差計算需要插入的幀數
+                        frame_rgb = build_video_frame(current_frame_data, capture_area)
+                        for _ in range(frame_times):
+                            GDATA["out"].write(frame_rgb)
+                            GDATA["written_frame_count"] += 1
+                        if is_time_anomaly:
+                            last_frame_time = current_time
+                        else:
+                            last_frame_time += frame_times * frame_step_time  # 更新最後一幀的時間
+    finally:
+        if GDATA["out"] is not None:
+            GDATA["out"].release()
+        cv2.destroyAllWindows()
+        if GDATA["written_frame_count"] <= 0:
+            log_event("video", "錄影結束但沒有寫入任何影像 frame，略過無效影片")
 
-    GDATA["out"].release()    
-    cv2.destroyAllWindows()
+
 def record_video():
     global GDATA
-    w = GDATA["x2"] - GDATA["x1"]
-    h = GDATA["y2"] - GDATA["y1"]
+    capture_area = GDATA["capture_area"]
     # 設置屏幕捕獲
-    monitor = {"top": GDATA["y1"], "left": GDATA["x1"], "width": w, "height": h}
+    monitor = {
+        "top": capture_area["top"],
+        "left": capture_area["left"],
+        "width": capture_area["width"],
+        "height": capture_area["height"],
+    }
     # 幀時間間隔
     frame_time = 1 / GDATA["fps"]
-    is_need_cursor = GDATA["UI"]["record_mouse"].get()
+    is_need_cursor = GDATA["record_mouse_enabled"]
     
     # 畫質
-    _compression_level = GDATA["UI"]["compression_level_selected"].get()
+    _compression_level = GDATA["compression_level"]
     
     GDATA["frame_count"] = 0
-    GDATA["run_start_time"] = time.time()
-    GDATA["start_time"] = time.time()
-    update_fps_label()
-    sct = mss.mss(compression_level=_compression_level,with_cursor=is_need_cursor)
+    GDATA["run_start_time"] = time.monotonic()
+    GDATA["start_time"] = time.monotonic()
+    ui_after(update_fps_label)
+    sct = mss.mss(compression_level=_compression_level, with_cursor=False)
+    if is_need_cursor:
+        log_event("video", "滑鼠游標改用軟體 overlay，避免 mss GDI 游標擷取造成 crash")
     while GDATA["recording"]:
-        #if is_need_cursor == True:
-        #    # 這樣才會一直更新滑鼠位置
-        #    # 後來直接改 mss/windows.py #328 與 #329 #367 的地方
-        #    # mss/base.py #240~#243 回收 ram
-        #    # 一直重新宣告 sct 造成記憶體肥大 crash
-        #    sct = mss.mss(compression_level=_compression_level,with_cursor=is_need_cursor)
         # 記錄當前時間
         GDATA["frame_count"] += 1
-        ct = time.time()
+        ct = time.monotonic()
         elapsed_time = ct - GDATA["start_time"]
 
         # 截取指定區域的圖像
         try:
-            GDATA["frame_list"].append({"timestamp":ct, "frame":sct.grab(monitor)})
-        except:
-            pass
+            screenshot = sct.grab(monitor)
+            cursor_position = get_cursor_position() if is_need_cursor else None
+            GDATA["frame_buffer"].put(ct, screenshot, cursor_position=cursor_position)
+            GDATA["video_consecutive_error_count"] = 0
+        except Exception as ex:
+            GDATA["video_error_count"] += 1
+            GDATA["video_consecutive_error_count"] += 1
+            unsafe_error = is_unsafe_capture_error(ex)
+            if GDATA["video_error_count"] == 1 or GDATA["video_error_count"] % 30 == 0 or unsafe_error:
+                record_thread_error("video", "擷取畫面失敗，已略過 frame #%s，連續失敗 %s 次" % (GDATA["video_error_count"], GDATA["video_consecutive_error_count"]), ex)
+            if unsafe_error or should_abort_capture(GDATA["video_consecutive_error_count"], GDATA["fps"]):
+                GDATA["recording"] = False
+                log_event("video", "畫面擷取失敗已停止錄影，避免 mss GDI 持續重試造成程式 crash")
+                ui_set_text(GDATA["UI"]["progress_label"], "畫面擷取失敗，已停止錄影")
+                if not GDATA["stop_in_progress"]:
+                    GDATA["stop_in_progress"] = True
+                    GDATA["THREAD"]["finish_thread"] = create_worker_thread("finish_thread", finish_recording)
+                    GDATA["THREAD"]["finish_thread"].start()
+                break
         if elapsed_time >= 1.0:
-            current_fps = GDATA["frame_count"] / elapsed_time                
+            current_fps = GDATA["frame_count"] / elapsed_time
             GDATA["frame_count"] = 0
-            GDATA["start_time"] = time.time()        
+            GDATA["start_time"] = time.monotonic()
+            log_frame_buffer_stats_if_needed()
 
-    #out.release()
-    #cv2.destroyAllWindows()
+    try:
+        sct.close()
+    except:
+        pass
 
 
 def record_mic_audio():
     global GDATA    
     samplerate = 44100
-    channels = 2
-    # 開啟音訊檔案準備寫入
-    with sf.SoundFile(GDATA["audio_mic_file"], mode="x", samplerate=samplerate, channels=channels) as file:
-        keywords = ["麥克風", "USB PnP Sound Device", "Realtek HD Audio Mic input"]
-
-        # 查找第一組匹配的設備
-        device_index, device_name = find_device_by_name(keywords)
-        if device_index == None:
-            device_index = 0
-        with sd.InputStream(samplerate=samplerate, channels=channels, device=device_index) as stream:
-            print("錄製麥克風聲音開始...")
-            while GDATA["recording"]:
-                data, overflowed = stream.read(1024)
-                file.write(data)
-            print("錄製麥克風聲音結束.")
-
-
-print(sd.query_devices())
+    channels = GDATA["mic_audio_channels"]
+    device_index = GDATA["mic_audio_device_index"]
+    if device_index is None:
+        GDATA["record_mic_enabled"] = False
+        log_event("audio", "麥克風音源不存在，已略過")
+        ui_set_text(GDATA["UI"]["progress_label"], "麥克風音源不存在，已略過")
+        return
+    try:
+        # 開啟音訊檔案準備寫入
+        with sf.SoundFile(GDATA["audio_mic_file"], mode="x", samplerate=samplerate, channels=channels) as file:
+            with sd.InputStream(samplerate=samplerate, channels=channels, device=device_index) as stream:
+                print("錄製麥克風聲音開始...")
+                while GDATA["recording"]:
+                    data, overflowed = stream.read(1024)
+                    file.write(data)
+                print("錄製麥克風聲音結束.")
+    except Exception as ex:
+        GDATA["record_mic_enabled"] = False
+        record_thread_error("audio", "麥克風錄音失敗", ex)
+        ui_set_text(GDATA["UI"]["progress_label"], "麥克風錄音失敗：%s" % (ex))
 
 
 def record_system_audio():
     global GDATA
     samplerate = 44100
-    channels = 2
-
-    # 開啟音訊檔案準備寫入
-    with sf.SoundFile(GDATA["audio_system_file"], mode="x", samplerate=samplerate, channels=channels) as file_system:
-        # 使用 OutputStream 寫入系統聲音
-        # 要查找的關鍵字，包括中文和英文名稱的一部分
-        keywords = ["立體聲混音", "Stereo Mix"]
-
-        # 查找第一組匹配的設備
-        device_index, device_name = find_device_by_name(keywords)
-        if device_index == None:
-            device_index = 0
-        print("使用音源: %s" % (device_index))
-        with sd.InputStream(samplerate=samplerate, channels=channels, device=device_index) as sys_stream:
-            print("錄製系統聲音開始...")
-            while GDATA["recording"]:
-                data, overflowed = sys_stream.read(1024)
-                file_system.write(data)
-            print("錄製系統聲音結束.")
+    channels = GDATA["system_audio_channels"]
+    device_index = GDATA["system_audio_device_index"]
+    if device_index is None:
+        GDATA["record_system_enabled"] = False
+        log_event("audio", "系統聲音音源不存在，已略過")
+        ui_set_text(GDATA["UI"]["progress_label"], "系統聲音音源不存在，已略過")
+        return
+    try:
+        # 開啟音訊檔案準備寫入
+        with sf.SoundFile(GDATA["audio_system_file"], mode="x", samplerate=samplerate, channels=channels) as file_system:
+            print("使用音源: %s" % (device_index))
+            with sd.InputStream(samplerate=samplerate, channels=channels, device=device_index) as sys_stream:
+                print("錄製系統聲音開始...")
+                while GDATA["recording"]:
+                    data, overflowed = sys_stream.read(1024)
+                    file_system.write(data)
+                print("錄製系統聲音結束.")
+    except Exception as ex:
+        GDATA["record_system_enabled"] = False
+        record_thread_error("audio", "系統聲音錄音失敗", ex)
+        ui_set_text(GDATA["UI"]["progress_label"], "系統聲音錄音失敗：%s" % (ex))
 
 
 def stop_recording():
@@ -320,156 +842,208 @@ def stop_recording():
     if not GDATA["recording"]:
         messagebox.showwarning("警告", "錄影未開始！")
         return
+    if GDATA["stop_in_progress"]:
+        return
     # Hide fps
     GDATA["UI"]["fps_label"].set("")
     GDATA["recording"] = False
-    ui_enable_disable(True)
-    if GDATA["UI"]["record_system_sound"].get() == True:
-        GDATA["THREAD"]["audio_system_thread"].join()
-    if GDATA["UI"]["record_mic_sound"].get() == True:
-        GDATA["THREAD"]["audio_mic_thread"].join()
+    GDATA["stop_in_progress"] = True
+    GDATA["UI"]["progress_label"].config(text="停止錄影中...")
+    GDATA["UI"]["progress"].config(value=5)
+    GDATA["UI"]["stop_button"].config(state=tk.DISABLED)
+    GDATA["UI"]["start_button"].config(state=tk.DISABLED)
+    ui_enable_disable(False)
+    GDATA["THREAD"]["finish_thread"] = create_worker_thread("finish_thread", finish_recording)
+    GDATA["THREAD"]["finish_thread"].start()
+
+
+def finish_recording():
+    global GDATA
+    if GDATA["record_system_enabled"] == True:
+        ui_set_processing_stage("等待系統聲音收尾...", 10)
+        join_worker_thread("audio_system_thread")
+    if GDATA["record_mic_enabled"] == True:
+        ui_set_processing_stage("等待麥克風收尾...", 15)
+        join_worker_thread("audio_mic_thread")
     # 影片最後才結束
     # time.sleep(3);
-    GDATA["THREAD"]["video_thread"].join()
-    GDATA["THREAD"]["process_thread"].join()
-    GDATA["UI"]["start_button"].config(state=tk.NORMAL)
-    GDATA["UI"]["stop_button"].config(state=tk.DISABLED)
-    messagebox.showinfo("提示", "錄影已停止")
+    ui_set_processing_stage("收尾影像資料...", 22)
+    join_worker_thread("video_thread")
+    ui_set_processing_stage("寫入最後影像 frame...", 30)
+    join_worker_thread("process_thread")
+    ui_set_processing_stage("錄影已停止，準備合成", 35)
     #time.sleep(3) # Wait 3sec
-    merge_audio_video()
+    try:
+        merge_audio_video()
+    except Exception as ex:
+        record_thread_error("merge", "轉檔啟動失敗", ex)
+        ui_set_text(GDATA["UI"]["progress_label"], "轉檔失敗：%s" % (ex))
+        restore_recording_ui()
+        if GDATA["close_after_merge"]:
+            ui_after(root.destroy)
 
-def find_device_by_name(keywords):
-    devices = sd.query_devices()
-    for idx, device in enumerate(devices):
-        for keyword in keywords:
-            if keyword in device["name"]:
-                return idx, device["name"]
-    return None, None  # 如果未找到匹配的設備，返回 None
+def has_audio_file_data(audio_file):
+    return audio_file and os.path.isfile(audio_file) and os.path.getsize(audio_file) > 44
+
+
+def prepare_audio_for_merge(tmp_merge_wav_file):
+    system_audio_ok = GDATA["record_system_enabled"] and has_audio_file_data(GDATA["audio_system_file"])
+    mic_audio_ok = GDATA["record_mic_enabled"] and has_audio_file_data(GDATA["audio_mic_file"])
+
+    if GDATA["record_system_enabled"] and not system_audio_ok:
+        log_event("audio", "系統聲音檔不存在或沒有資料，合成時略過")
+    if GDATA["record_mic_enabled"] and not mic_audio_ok:
+        log_event("audio", "麥克風檔不存在或沒有資料，合成時略過")
+
+    if system_audio_ok and mic_audio_ok:
+        ui_set_processing_stage("合併系統聲與麥克風...", 45)
+        speakersound = AudioSegment.from_file(GDATA["audio_system_file"])
+        micsound = AudioSegment.from_file(GDATA["audio_mic_file"])
+        if len(micsound) > len(speakersound):
+            mixsound = micsound.overlay(speakersound)
+        else:
+            mixsound = speakersound.overlay(micsound)
+        mixsound.export(tmp_merge_wav_file, format="wav")
+        del speakersound
+        del micsound
+        del mixsound
+        return tmp_merge_wav_file
+
+    if system_audio_ok:
+        return GDATA["audio_system_file"]
+    if mic_audio_ok:
+        return GDATA["audio_mic_file"]
+    return None
+
+
+def run_ffmpeg_fast_mux(video_file, audio_file, temp_output_file):
+    command = build_ffmpeg_fast_mux_command(get_ffmpeg_exe(), video_file, audio_file, temp_output_file)
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creation_flags,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("ffmpeg 快速合成失敗: %s" % get_tail_text(result.stderr))
+
+
+def merge_audio_video_with_moviepy(audio_file, temp_output_file):
+    class MyBarLogger(ProgressBarLogger):
+        def __init__(self):
+            super().__init__()
+            self.last_message = ""
+            self.previous_percentage = -1
+
+        def callback(self, **changes):
+            for (parameter, value) in changes.items():
+                self.last_message = value
+
+        def bars_callback(self, bar, attr, value, old_value=None):
+            if "Writing video" not in self.last_message:
+                return
+            total = self.bars[bar].get("total", 0)
+            if total <= 0:
+                return
+            percentage = int((value / total) * 100)
+            if percentage != self.previous_percentage:
+                self.previous_percentage = percentage
+                ui_set_processing_stage("慢速輸出影片 %s%%" % percentage, 50 + min(49, percentage * 0.49))
+
+    video_clip = None
+    audio_clip = None
+    final_clip = None
+    logger = MyBarLogger()
+    try:
+        video_clip = VideoFileClip(GDATA["video_file"])
+        if audio_file is not None:
+            audio_clip = AudioFileClip(audio_file)
+            final_clip = video_clip.set_audio(audio_clip)
+            final_clip.write_videofile(temp_output_file, codec="libx264", audio_codec="aac", logger=logger)
+        else:
+            video_clip.write_videofile(temp_output_file, codec="libx264", audio=False, logger=logger)
+    finally:
+        for clip in [final_clip, audio_clip, video_clip]:
+            if clip is not None:
+                try:
+                    clip.close()
+                except:
+                    pass
+
+
+def reveal_output_file(output_file):
+    try:
+        subprocess.Popen(build_explorer_select_args(output_file))
+    except Exception as ex:
+        record_thread_error("merge", "開啟輸出檔位置失敗，改開資料夾", ex)
+        webbrowser.open(os.path.dirname(os.path.abspath(output_file)))
+
+
+def notify_recording_completed(output_file):
+    messagebox.showinfo("錄影完成", "影片已完成：\n%s" % output_file)
+    reveal_output_file(output_file)
 
 
 def merge_audio_video():
     global GDATA
-    
-    # 此時才處理幀列表、變色、輸出影片
-    # (cv2.VIDEOWRITER_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY
-    
-    #for frame in GDATA["frame_list"]:
-    #    # 現在才處理幀，轉成 BGR 寫入影片
-    #    # 最後影片完成再處理顏色 
-    #    frame = np.array(frame)        
-    #    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-    #    GDATA["out"].write(frame)
-    
-    del GDATA["frame_list"]
-    GDATA["frame_list"] = []
-    #GDATA["out"].release()
-    #del GDATA["out"]
-    # 讀取錄製好的視頻    
-    video_clip = VideoFileClip(GDATA["video_file"])
-    
-    # 進度條初始化
-    total_frames = video_clip.reader.nframes
-    #GDATA["UI"]["progress"] = tqdm(total=total_frames, desc="Processing video", unit="frame")
-    # 更新進度條的函數
-    def update_progress(get_frame, t):
-        current_frame = int(t * GDATA["fps"])
-        progress_percentage = (current_frame / total_frames) * 100        
-        GDATA["UI"]["progress"]["value"] = progress_percentage        
-        return get_frame(t)
-    # 將進度條綁定到每一幀
-    GDATA["UI"]["progress_label"].config(text="合併影像")
-    processed_video_clip = video_clip.fl(update_progress, apply_to=['mask', 'video'])
+
+    GDATA["frame_buffer"].clear()
+    if GDATA["written_frame_count"] <= 0:
+        raise RuntimeError("沒有可輸出的影像 frame，已略過轉檔")
+    if not os.path.isfile(GDATA["video_file"]) or os.path.getsize(GDATA["video_file"]) <= 0:
+        raise RuntimeError("暫存影片不存在或大小為 0: %s" % GDATA["video_file"])
+
     def run():
-        # Logger From : https://stackoverflow.com/questions/69423410/moviepy-getting-progress-bar-values
-        class MyBarLogger(ProgressBarLogger):
-
-            def __init__(self):
-                super().__init__()
-                self.last_message = ''
-                self.previous_percentage = 0  
-                GDATA["UI"]["progress_label"].config(text="輸出影片")
-            
-            def callback(self, **changes):
-                # Every time the logger message is updated, this function is called with
-                # the `changes` dictionary of the form `parameter: new value`.
-                for (parameter, value) in changes.items():
-                    # print ('Parameter %s is now %s' % (parameter, value))
-                    self.last_message = value
-            
-            def bars_callback(self, bar, attr, value,old_value=None):
-                # Every time the logger progress is updated, this function is called        
-                if 'Writing video' in self.last_message:
-                    percentage = (value / self.bars[bar]['total']) * 100
-                    GDATA["UI"]["progress"]["value"] = self.previous_percentage
-                    if percentage > 0 and percentage < 100:
-                        if int(percentage) != self.previous_percentage:
-                            self.previous_percentage = int(percentage)
-                            #print(self.previous_percentage)                            
-
-        logger = MyBarLogger()
         tmp_merge_wav_file = GDATA["output_path"] + "\\" + str(int(time.time())) + "_merge.wav"
-        if GDATA["UI"]["record_system_sound"].get() == True and GDATA["UI"]["record_mic_sound"].get() == True:
-            # from: https://stackoverflow.com/questions/59665469/pyaudio-how-to-capture-microphone-and-system-sounds-in-a-single-stream
-            # 同時有二個聲音，合併
-            speakersound = AudioSegment.from_file(GDATA["audio_system_file"])
-            
-            micsound = AudioSegment.from_file(GDATA["audio_mic_file"])
-            mixsound = speakersound.overlay(micsound)
-            mixsound.export(tmp_merge_wav_file, format="wav")
-            del speakersound        
-            del mixsound
-            final_audio_clip = AudioFileClip(tmp_merge_wav_file)
-            # 將合併後的音訊剪輯添加到視訊剪輯中
-            final_clip = processed_video_clip.set_audio(final_audio_clip)
-            
-            del final_audio_clip
-            final_clip.write_videofile(GDATA["output_file"], codec="libx264", audio_codec="aac", logger=logger)       
-                    
-            del final_clip
-        elif GDATA["UI"]["record_system_sound"].get() == True and GDATA["UI"]["record_mic_sound"].get() == False:
-            # 只有系統聲
-            final_audio_clip = AudioFileClip(GDATA["audio_system_file"])
-            final_clip = processed_video_clip.set_audio(final_audio_clip)
-            final_clip.write_videofile(GDATA["output_file"], codec="libx264", audio_codec="aac", logger=logger)
-            
-            del final_audio_clip
-            del final_clip
-        elif GDATA["UI"]["record_system_sound"].get() == False and GDATA["UI"]["record_mic_sound"].get() == True:
-            # 只有麥克風
-            final_audio_clip = AudioFileClip(GDATA["audio_mic_file"])
-            final_clip = processed_video_clip.set_audio(final_audio_clip)
-            final_clip.write_videofile(GDATA["output_file"], codec="libx264", audio_codec="aac", logger=logger)
-            
-            del final_audio_clip
-            del final_clip
-        else:
-            # 無聲音
-            video_clip.write_videofile(GDATA["output_file"], codec="libx264", logger=logger)
-            del video_clip
+        temp_output_file = build_final_temp_path(GDATA["output_file"])
+        completed = False
+        try:
+            if os.path.isfile(temp_output_file):
+                try:
+                    os.remove(temp_output_file)
+                except:
+                    pass
 
-        if os.path.isfile(GDATA["video_file"]):
-            try:
-                os.remove(GDATA["video_file"])
-            except:
-                pass
-        if os.path.isfile(GDATA["audio_mic_file"]):
-            try:
-                os.remove(GDATA["audio_mic_file"])
-            except:
-                pass
-        if os.path.isfile(GDATA["audio_system_file"]):
-            try:
-                os.remove(GDATA["audio_system_file"])
-            except:
-                pass
-        if os.path.isfile(tmp_merge_wav_file):
-            try:
-                os.remove(tmp_merge_wav_file)
-            except:
-                pass
-        GDATA["UI"]["progress_label"].config(text="轉檔完成")
-        GDATA["UI"]["progress"]["value"] = 0
-    GDATA["THREAD"]["run"] = threading.Thread(target=run)    
+            ui_set_processing_stage("整理暫存資料...", 40)
+            audio_file = prepare_audio_for_merge(tmp_merge_wav_file)
+
+            if audio_file is None:
+                ui_set_processing_stage("無聲音，快速完成影片...", 85)
+                safe_replace_file(GDATA["video_file"], GDATA["output_file"])
+            else:
+                try:
+                    ui_set_processing_stage("快速合成影片與聲音...", 65)
+                    run_ffmpeg_fast_mux(GDATA["video_file"], audio_file, temp_output_file)
+                except Exception as fast_ex:
+                    record_thread_error("merge", "ffmpeg 快速合成失敗，改用 MoviePy 慢速輸出", fast_ex)
+                    ui_set_processing_stage("快速合成失敗，改用慢速輸出...", 50)
+                    merge_audio_video_with_moviepy(audio_file, temp_output_file)
+                safe_replace_file(temp_output_file, GDATA["output_file"])
+
+            completed = True
+            log_event("merge", "影片輸出完成: %s" % GDATA["output_file"])
+            ui_set_processing_stage("轉檔完成", 100)
+        except Exception as ex:
+            record_thread_error("merge", "轉檔失敗", ex)
+            ui_set_text(GDATA["UI"]["progress_label"], "轉檔失敗：%s" % (ex))
+        finally:
+            for cleanup_file in [GDATA["video_file"], GDATA["audio_mic_file"], GDATA["audio_system_file"], tmp_merge_wav_file, temp_output_file]:
+                if os.path.isfile(cleanup_file):
+                    try:
+                        os.remove(cleanup_file)
+                    except:
+                        pass
+            restore_recording_ui(reset_progress=not completed)
+            if completed and not GDATA["close_after_merge"]:
+                ui_after(notify_recording_completed, GDATA["output_file"])
+            if GDATA["close_after_merge"]:
+                ui_after(root.destroy)
+
+    GDATA["THREAD"]["run"] = create_worker_thread("run", run)
     GDATA["THREAD"]["run"].start()
 
 def open_folder():
@@ -483,11 +1057,16 @@ def on_message():
 
 def on_closing():
     global GDATA    
-    if GDATA["recording"]:
-        if messagebox.askokcancel("離開", "錄影正在進行，確定要離開嗎？"):
-            stop_recording()
-            root.destroy()
+    if GDATA["recording"] or GDATA["stop_in_progress"]:
+        if messagebox.askokcancel("離開", "錄影或轉檔正在進行，是否完成收尾後離開？"):
+            save_current_app_config()
+            GDATA["close_after_merge"] = True
+            if GDATA["recording"]:
+                stop_recording()
+            else:
+                GDATA["UI"]["progress_label"].config(text="處理完成後離開")
     else:
+        save_current_app_config()
         root.destroy()
 
 
@@ -532,8 +1111,8 @@ if os.path.isfile(GDATA["pwd"] + "\\tmp_icon.ico"):
 # 計算窗口位置
 screen_width = root.winfo_screenwidth()
 screen_height = root.winfo_screenheight()
-window_width = 450  # 假設窗口寬度為 450
-window_height = 140  # 假設窗口高度為  140
+window_width = GDATA["window_width"]  # 維持小視窗緊緻版面
+window_height = GDATA["window_height_collapsed"]
 
 # 計算窗口位置: 右下角150px，距離底部30%
 x = screen_width - window_width - 150
@@ -546,40 +1125,58 @@ root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 root.resizable(False, False)
 
 root.title(f"我的桌面錄影 - V{GDATA["VERSION"]} By 羽山秋人 (https://3wa.tw)")
+# Tk option database 使用 Tcl list 語法，字型名稱有空白時必須用 braces 包住。
+root.option_add("*Font", "{Microsoft JhengHei UI} 9")
 
-# 使用Frame將按鈕排成一行
-# 第一列
+
+def report_tk_callback_exception(exc_type, exc_value, exc_traceback):
+    message = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    write_crash_log("Tk callback 例外:\n%s" % message)
+    try:
+        messagebox.showerror("程式錯誤", "介面事件發生錯誤，已寫入 output\\logs\\crash_*.log")
+    except:
+        pass
+
+
+root.report_callback_exception = report_tk_callback_exception
+
+# 第一列：主要動作
 GDATA["UI"]["button_frame"] = tk.Frame(root)
-GDATA["UI"]["button_frame"].pack(pady=10)
+GDATA["UI"]["button_frame"].pack(pady=(6, 2))
 
-GDATA["UI"]["select_area_button"] = tk.Button(GDATA["UI"]["button_frame"], text="選擇錄影範圍", command=select_area)
-GDATA["UI"]["select_area_button"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["select_area_button"] = tk.Button(
+    GDATA["UI"]["button_frame"], text="選擇錄影範圍", command=select_area
+)
+GDATA["UI"]["select_area_button"].pack(side=tk.LEFT, padx=2)
 
-GDATA["UI"]["start_button"] = tk.Button(GDATA["UI"]["button_frame"], text="開始錄影", command=start_recording)
-GDATA["UI"]["start_button"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["start_button"] = tk.Button(
+    GDATA["UI"]["button_frame"], text="開始錄影", command=start_recording
+)
+GDATA["UI"]["start_button"].pack(side=tk.LEFT, padx=2)
 
 GDATA["UI"]["stop_button"] = tk.Button(
     GDATA["UI"]["button_frame"], text="停止錄影", command=stop_recording, state=tk.DISABLED
 )
-GDATA["UI"]["stop_button"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["stop_button"].pack(side=tk.LEFT, padx=2)
 
-GDATA["UI"]["open_folder_button"] = tk.Button(GDATA["UI"]["button_frame"], text="打開錄影資料夾", command=open_folder)
-GDATA["UI"]["open_folder_button"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["open_folder_button"] = tk.Button(
+    GDATA["UI"]["button_frame"], text="打開錄影資料夾", command=open_folder
+)
+GDATA["UI"]["open_folder_button"].pack(side=tk.LEFT, padx=2)
 
 GDATA["UI"]["info_button"] = tk.Button(GDATA["UI"]["button_frame"], text="說明", command=on_message)
-GDATA["UI"]["info_button"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["info_button"].pack(side=tk.LEFT, padx=2)
 
 GDATA["UI"]["exit_button"] = tk.Button(GDATA["UI"]["button_frame"], text="離開程式", command=on_closing)
-GDATA["UI"]["exit_button"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["exit_button"].pack(side=tk.LEFT, padx=2)
 
-# 第二列
-
+# 第二列：錄製選項與音源輔助
 GDATA["UI"]["checkbox_frame"] = tk.Frame(root)
-GDATA["UI"]["checkbox_frame"].pack()
+GDATA["UI"]["checkbox_frame"].pack(pady=(0, 1))
 
 # 創建並佈局"截取滑鼠"，預設選中
 GDATA["UI"]["record_mouse"] = tk.BooleanVar()
-GDATA["UI"]["record_mouse"].set(True)  # 預設選擇
+GDATA["UI"]["record_mouse"].set(GDATA["app_config"]["record_mouse"])  # 預設選擇
 GDATA["UI"]["checkbox_mouse_cursor"] = tk.Checkbutton(
     GDATA["UI"]["checkbox_frame"], text="錄滑鼠指標", variable=GDATA["UI"]["record_mouse"]
 )
@@ -587,7 +1184,7 @@ GDATA["UI"]["checkbox_mouse_cursor"].pack(side=tk.LEFT, padx=5)
 
 # 創建並佈局"錄系統聲音"的複選框，預設選擇
 GDATA["UI"]["record_system_sound"] = tk.BooleanVar()
-GDATA["UI"]["record_system_sound"].set(True)  # 預設選擇
+GDATA["UI"]["record_system_sound"].set(GDATA["app_config"]["record_system_sound"])  # 預設選擇
 GDATA["UI"]["checkbox_system_sound"] = tk.Checkbutton(
     GDATA["UI"]["checkbox_frame"], text="錄系統聲音", variable=GDATA["UI"]["record_system_sound"]
 )
@@ -595,51 +1192,98 @@ GDATA["UI"]["checkbox_system_sound"].pack(side=tk.LEFT, padx=5)
 
 # 創建並佈局"錄麥克風"的複選框，預設不選中
 GDATA["UI"]["record_mic_sound"] = tk.BooleanVar()
-GDATA["UI"]["record_mic_sound"].set(False)  # 預設不選
+GDATA["UI"]["record_mic_sound"].set(GDATA["app_config"]["record_mic_sound"])  # 預設不選
 GDATA["UI"]["checkbox_microphone"] = tk.Checkbutton(
     GDATA["UI"]["checkbox_frame"], text="錄麥克風", variable=GDATA["UI"]["record_mic_sound"]
 )
 GDATA["UI"]["checkbox_microphone"].pack(side=tk.LEFT, padx=5)
 
+GDATA["UI"]["auto_test_audio_button"] = tk.Button(
+    GDATA["UI"]["checkbox_frame"], text="自動測試", command=auto_test_audio_devices
+)
+GDATA["UI"]["auto_test_audio_button"].pack(side=tk.LEFT, padx=(8, 2))
+
+GDATA["UI"]["toggle_audio_options_button"] = tk.Button(
+    GDATA["UI"]["checkbox_frame"], text="音源選擇", command=toggle_audio_options
+)
+GDATA["UI"]["toggle_audio_options_button"].pack(side=tk.LEFT, padx=2)
+
+# 音源選擇列
+GDATA["UI"]["audio_frame"] = tk.Frame(root)
+GDATA["UI"]["audio_frame"].pack(pady=(2, 4))
+
+GDATA["UI"]["system_audio_row"] = tk.Frame(GDATA["UI"]["audio_frame"])
+GDATA["UI"]["system_audio_row"].pack()
+
+GDATA["UI"]["system_audio_device_label"] = tk.Label(GDATA["UI"]["system_audio_row"], text="系統音源：", width=9, anchor=tk.E)
+GDATA["UI"]["system_audio_device_label"].pack(side=tk.LEFT, padx=(0, 3))
+
+GDATA["UI"]["system_audio_device_selected"] = StringVar()
+GDATA["UI"]["system_audio_device_selected"].set("無可用輸入音源")
+GDATA["UI"]["system_audio_device_menu"] = tk.OptionMenu(GDATA["UI"]["system_audio_row"], GDATA["UI"]["system_audio_device_selected"], "無可用輸入音源")
+GDATA["UI"]["system_audio_device_menu"].config(width=30)
+GDATA["UI"]["system_audio_device_menu"].pack(side=tk.LEFT, padx=(0, 3))
+
+GDATA["UI"]["refresh_audio_devices_button"] = tk.Button(GDATA["UI"]["system_audio_row"], text="重整音源", command=refresh_audio_devices)
+GDATA["UI"]["refresh_audio_devices_button"].pack(side=tk.LEFT, padx=(3, 0))
+
+GDATA["UI"]["mic_audio_row"] = tk.Frame(GDATA["UI"]["audio_frame"])
+GDATA["UI"]["mic_audio_row"].pack(pady=(2, 0), anchor=tk.W)
+
+GDATA["UI"]["mic_audio_device_label"] = tk.Label(GDATA["UI"]["mic_audio_row"], text="麥克風：", width=9, anchor=tk.E)
+GDATA["UI"]["mic_audio_device_label"].pack(side=tk.LEFT, padx=(0, 3))
+
+GDATA["UI"]["mic_audio_device_selected"] = StringVar()
+GDATA["UI"]["mic_audio_device_selected"].set("無可用輸入音源")
+GDATA["UI"]["mic_audio_device_menu"] = tk.OptionMenu(GDATA["UI"]["mic_audio_row"], GDATA["UI"]["mic_audio_device_selected"], "無可用輸入音源")
+GDATA["UI"]["mic_audio_device_menu"].config(width=30)
+GDATA["UI"]["mic_audio_device_menu"].pack(side=tk.LEFT, padx=(0, 3))
+
 # 第三列
 GDATA["UI"]["third_frame"] = tk.Frame(root)
-GDATA["UI"]["third_frame"].pack()
+GDATA["UI"]["third_frame"].pack(pady=(0, 2))
 
 # 創建並布局下拉選單
 GDATA["UI"]["fps_txt_label"] = tk.Label(GDATA["UI"]["third_frame"], text="選擇 FPS：")
-GDATA["UI"]["fps_txt_label"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["fps_txt_label"].pack(side=tk.LEFT, padx=(5, 3))
 
 fps_options = [15, 20, 25, 27, 30, 60]
 GDATA["UI"]["fps_selected"] = tk.IntVar()
-GDATA["UI"]["fps_selected"].set(25)  # 預設 25 fps
+GDATA["UI"]["fps_selected"].set(GDATA["app_config"]["fps"])  # 預設 25 fps
 GDATA["UI"]["fps_menu"] = tk.OptionMenu(GDATA["UI"]["third_frame"], GDATA["UI"]["fps_selected"], *fps_options)
-GDATA["UI"]["fps_menu"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["fps_menu"].config(width=4)
+GDATA["UI"]["fps_menu"].pack(side=tk.LEFT, padx=(0, 16))
 
 # 畫質壓縮
-GDATA["UI"]["compression_level_label"] = tk.Label(GDATA["UI"]["third_frame"], text="畫質壓縮(0不壓縮)：")
-GDATA["UI"]["compression_level_label"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["compression_level_label"] = tk.Label(GDATA["UI"]["third_frame"], text="壓縮：")
+GDATA["UI"]["compression_level_label"].pack(side=tk.LEFT, padx=(0, 3))
 compression_level_option = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 GDATA["UI"]["compression_level_selected"] = tk.IntVar()
-GDATA["UI"]["compression_level_selected"].set(2)  # 預設 2 fps
+GDATA["UI"]["compression_level_selected"].set(GDATA["app_config"]["compression_level"])  # 預設 2 fps
 GDATA["UI"]["compression_level_selected_menu"] = tk.OptionMenu(GDATA["UI"]["third_frame"], GDATA["UI"]["compression_level_selected"], *compression_level_option)
-GDATA["UI"]["compression_level_selected_menu"].pack(side=tk.LEFT, padx=5)
+GDATA["UI"]["compression_level_selected_menu"].config(width=4)
+GDATA["UI"]["compression_level_selected_menu"].pack(side=tk.LEFT, padx=(0, 5))
 
 # 顯示 fps 數值使用
 GDATA["UI"]["fps_label"] = StringVar()
-GDATA["UI"]["fps_display"] = Label(GDATA["UI"]["third_frame"], textvariable=GDATA["UI"]["fps_label"])
-GDATA["UI"]["fps_display"].pack()
+GDATA["UI"]["fps_display"] = Label(GDATA["UI"]["third_frame"], textvariable=GDATA["UI"]["fps_label"], width=18, anchor=tk.W)
+GDATA["UI"]["fps_display"].pack(side=tk.LEFT, padx=(0, 5))
 
 # 第四列
 GDATA["UI"]["fouth_frame"] = tk.Frame(root)
-GDATA["UI"]["fouth_frame"].pack()
+GDATA["UI"]["fouth_frame"].pack(pady=(0, 6))
 
 
-GDATA["UI"]["progress_label"] = tk.Label(GDATA["UI"]["fouth_frame"], text="進度條：")
-GDATA["UI"]["progress_label"].pack(side=tk.LEFT)
+GDATA["UI"]["progress_label"] = tk.Label(GDATA["UI"]["fouth_frame"], text="進度：")
+GDATA["UI"]["progress_label"].pack(side=tk.LEFT, padx=(0, 5))
 
 GDATA["UI"]["progress"] = ttk.Progressbar(GDATA["UI"]["fouth_frame"], orient="horizontal", length=300, mode="determinate")
 GDATA["UI"]["progress"].pack() #pady=20
 
+
+GDATA["root_ready"] = True
+refresh_audio_devices()
+set_audio_options_visible(False)
 
 
 root.protocol("WM_DELETE_WINDOW", on_closing)
@@ -657,19 +1301,19 @@ def update_fps_label():
     #global GDATA
     if GDATA["recording"]:
         try:
-            #GDATA["UI"]["fps_label"].config(f"FPS: {calculate_current_fps():.2f}")
-            GDATA["UI"]["fps_label"].set(f"FPS: {calculate_current_fps():.2f}")
+            # 窄版 UI 只顯示必要狀態，避免錄影時擠出視窗。
+            GDATA["UI"]["fps_label"].set("%.0ffps %s" % (calculate_current_fps(), get_frame_buffer_stats_text()))
             root.after(1000, update_fps_label)  # 每秒更新一次
-        except:
-            pass                
+        except Exception as ex:
+            log_event("ui", "更新 FPS 顯示失敗", ex)
 
 # 計算當前 FPS 的輔助函數
 def calculate_current_fps():
     #global GDATA
-    elapsed_time = time.time() - GDATA["start_time"]
+    elapsed_time = time.monotonic() - GDATA["start_time"]
     current_fps = GDATA["frame_count"] / elapsed_time if elapsed_time > 0 else 0
     GDATA["frame_count"] = 0
-    GDATA["start_time"] = time.time()
+    GDATA["start_time"] = time.monotonic()
     return current_fps
 
 root.mainloop()
