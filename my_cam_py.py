@@ -11,7 +11,8 @@ import os
 import webbrowser
 import sounddevice as sd
 import soundfile as sf
-from moviepy.editor import VideoFileClip, AudioFileClip
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.audio.io.AudioFileClip import AudioFileClip
 from pydub import AudioSegment
 import sys
 import base64

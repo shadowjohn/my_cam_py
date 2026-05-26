@@ -6,17 +6,19 @@
 
 - 新版 `dist/my_cam_py.exe` 約 102.94 MB，超過 GitHub 單檔 100MB 限制，push 會被 pre-receive hook 擋下。
 - 使用者要求維持單檔 exe，不增加旁邊檔案，也不改成依賴外部指令；目標是壓到 100MB 以內可進 git。
+- 第一版瘦身後排除了 `requests`，但 `moviepy.editor` 入口會載入 `moviepy.video.io.downloader`，導致 exe 啟動時出現 `ModuleNotFoundError: No module named 'requests'`。
 
 ### 已調整
 
 - `build.bat` 排除打包時不需要的 optional 套件：`matplotlib`、`contourpy`、`cycler`、`fontTools`、`kiwisolver`、`tornado`、`requests`、`urllib3`、`certifi`、`charset_normalizer`、`idna`。
 - 移除 `--add-data=C:\Python312_64\Lib\site-packages\moviepy:moviepy`，避免把整包 moviepy 原始檔作為 data 重複塞進 exe；實際 import 仍由 PyInstaller 依依賴打包。
 - `.gitignore` 移除 `/dist/*.exe`，允許瘦身後的 `dist/my_cam_py.exe` 回到 git 追蹤。
+- `my_cam_py.py` 不再使用 `from moviepy.editor import ...`，改用 `moviepy.video.io.VideoFileClip` 與 `moviepy.audio.io.AudioFileClip` 直接入口，避開 downloader 與 requests 啟動依賴。
 
 ### 驗證
 
-- `dist/my_cam_py.exe` 從 107,938,885 bytes 降為 97,440,455 bytes，低於 GitHub 100,000,000 bytes 限制。
-- 瘦身版 `dist\my_cam_py.exe` 啟動後維持執行超過 6 秒，未因排除 optional 套件立刻 crash。
+- `dist/my_cam_py.exe` 從 107,938,885 bytes 降為 97,384,101 bytes，低於 GitHub 100,000,000 bytes 限制。
+- 瘦身版 `dist\my_cam_py.exe` 啟動後維持執行超過 6 秒，未因排除 optional 套件或移除 `moviepy.editor` 入口立刻 crash。
 
 ## 2026-05-26 停止後進度與快速合成
 
